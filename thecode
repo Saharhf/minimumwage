@@ -1,0 +1,533 @@
+rm(list=ls())
+# READ IN DATA 
+df1 = read.csv("CPIAUCNS.CSV", header = TRUE)
+df2 = read.csv("INDPRO (3).CSV")
+df3 = read.csv("UNRATENSA.csv")
+df=merge(df1, df2)
+df=merge(df,df3)
+str(df)
+summary(df)
+
+# removing last 8 obs to allow out-of-sample forecast comparison
+n=length(df$CPIAUCNS)
+n
+cprice = df$CPIAUCNS[1:(n-8)]
+indprod = df$INDPRO[1:(n-8)]
+unrate = df$UNRATENSA[1:(n-8)]
+
+# take logs and difference (since all variables appear to be I(1))
+cp = log(cprice)
+ip = log(indprod)
+ur = log(unrate)
+
+par(mfrow=c(2,2))
+plot(cp, type='l',col=1)
+plot(ip, type='l',col=2)
+plot(ur, type='l',col=3)
+#summary stats
+summary(cp); sd(cp)
+summary(ip); sd(ip)
+summary(ur); sd(ur)
+
+#checking for the order of integration (they are all I(1))
+source("intord.R")
+intord(cp)
+intord(ip)
+intord(ur)
+
+
+#differencing
+dcp = diff(cp)
+dip = diff(ip)
+dur = diff(ur)
+
+#summary stats
+summary(dcp); sd(dcp)
+summary(dip); sd(dip)
+summary(dur); sd(dur)
+
+
+# Cointegration
+# Johansen test
+library(urca)
+library(vars)
+
+# First step in Johansen test is determine order of the VAR undifferenced
+yy = cbind(dcp, dip, dur)
+# lag selection criteria
+VARselect(yy, lag.max=24, type="const")
+#the number of lags is between 3 and 13
+
+
+# Johansen tests:
+jc <- ca.jo(yy, type="eigen", K=13,ecdet="const") 
+summary(jc)
+jct <- ca.jo(yy, type="trace", K=13, ecdet="const") 
+summary(jct)
+
+# Engle-Granger:
+rc = lm(dur ~ dip+ dcp)
+summary(rc)
+res1 = rc$residuals
+intord(res1)
+
+rc2 = lm(dip ~ dcp + dur)
+summary(rc2)
+res2 = rc2$residuals
+intord(res2)
+
+# ARIMA model
+# combining with seasonal dummy variables
+# arma = arima(dc, order = c(4,0,0),xreg=s$seas[2:n,1:3])
+p = 13
+d = 0
+q = 2
+arma = arima(dur, order = c(p,d,q), seasonal = list(order = c(1,0,0)))
+arma
+res = arma$residuals
+y = dur
+yh = y - res
+yy = cbind(y,yh)
+par(mfrow=c(1,1))
+matplot(yy,type='l',col=1:2,main="ARIMA(13,0,1) + seasonals",lty=1)
+legend("topleft",legend=c("Actual","Fitted"),col=c(1:2),lty=1,lwd=1,bty="n",cex=1.1)
+
+# summary model statistics
+rss = as.numeric(t(res)%*%res)
+tss = t(y - mean(y))%*%(y - mean(y))
+R2 = as.numeric(1 - rss/tss)
+n = length(y)
+
+aic = arma$aic
+# aicch = -2*arma$loglik + 2*(p+q) - use this to check aic same formula
+bic = -2*arma$loglik + log(n)*(p+q)
+
+arma
+cbind(rss,R2,aic,bic)
+
+# Serial correlation
+
+# Box-Ljung Q statistic p-values
+blt <- rep(0,20)
+for (i in 1:20) {
+  b <- Box.test(res,lag = i , type = "Ljung-Box")
+  blt[i] <- b$p.value
+}
+blt
+
+# Dynamic Model
+library(dynlm)
+#create time series version of the variables
+
+tcp = ts(dcp, frequency = 12)
+tip = ts(dip, frequency = 12)
+tur = ts(dur, frequency = 12)
+ecmt = ts(res2, frequency = 12)
+
+#error correction because the variables are cointegrated
+m1 = dynlm(tur~ L(tur, 1:13) + L(tip, 0:5) + L(tcp, 0:8) + season(tur))
+summary(m1)
+AIC(m1); BIC(m1)
+bgtest(m1,order=1)
+bgtest(m1,order=2)
+bgtest(m1,order=3)
+bgtest(m1,order=4)
+bgtest(m1,order=5)
+bgtest(m1,order=6)
+bgtest(m1,order=7)
+bgtest(m1,order=8)
+bgtest(m1,order=9)
+bgtest(m1,order=10)
+bgtest(m1,order=11)
+bgtest(m1,order=12)
+bgtest(m1,order=13)
+
+#plotting actual versus fitted
+resm1 = m1$residuals
+ym1 = tur
+yhm1 = ym1 - resm1
+yym1 = cbind(ym1,yhm1)
+par(mfrow=c(1,1))
+matplot(yym1,type='l',col=1:2,main="Dynamic Model + seasonals",lty=1)
+legend("topleft",legend=c("Actual","Fitted"),col=c(1:2),lty=1,lwd=1,bty="n",cex=1.1)
+
+library(forecast)
+
+### DYNAMIC forecasting with a regression model
+# To forecast 1 period into the future without using future values of RHS variables
+# ONLY includes lags of variables:
+mf1 = dynlm(tur~ L(tur, 1:13) + L(tip, 1:5) + L(tcp, 1:8) + season(tur))
+summary(mf1)
+AIC(mf1); BIC(mf1)
+
+# Foreasting 2 periods ahead, starting with t-2 lag of all variables
+mf2=dynlm(tur~ L(tur, 2:13) + L(tip, 2:5) + L(tcp, 2:8) + season(tur))
+summary(mf2)
+AIC(mf2); BIC(mf2)
+
+# Forecasting 3 periods ahead
+mf3 = dynlm(tur~ L(tur, 3:13) + L(tip, 3:5) + L(tcp, 3:8) + season(tur))
+summary(mf3)
+AIC(mf3); BIC(mf3)
+
+# Forecasting 4 periods
+mf4 = dynlm(tur~ L(tur, 4:13) + L(tip, 4:5) + L(tcp, 4:8) + season(tur))
+summary(mf4)
+AIC(mf4); BIC(mf4)
+
+#VAR Model
+
+# stacking the variables
+yy = cbind(dcp, dip, dur)
+# lag selection criteria
+VARselect(yy, lag.max=14, type="const")
+#estimate the VAR
+var3 <- VAR(yy, p=13, type="const", season = 12)
+summary(var3)
+plot(var3, names="dur")
+
+# GC test  for unemployment rate
+var_tur = dynlm(tur ~ L(tur,1:13) + L(tip, 0:5) + L(tcp, 0:8) + season(tur))
+
+# Does tip GC tur?
+var_tur_rtip = dynlm(tur ~ L(tur,1:13) +  L(tcp, 0:8) + season(tur))
+summary(var_tur_rtip)
+anova(var_tur_rtip, var_tur)
+
+# Does tcp GC tur?
+var_tur_rtcp = dynlm(tur ~ L(tur,1:13) + L(tip, 0:5) +  season(tur))
+summary(var_tur_rtcp)
+anova(var_tur_rtcp, var_tur)
+
+# Does tur GC tur?
+var_tur_rtur = dynlm(tur ~ L(tip, 0:5) + L(tcp, 0:8) + season(tur))
+summary(var_tur_rtur)
+anova(var_tur_rtur, var_tur)
+
+source("gctest (1).R")
+?gctest
+gctest(var_tur_rtur, var_tur)
+
+# Does season GC tur?
+var_tur_rseas = dynlm(tur ~ L(tur,1:13)+ L(tip, 0:5) + L(tcp, 0:8) )
+summary(var_tur_rseas)
+anova(var_tur_rseas, var_tur)
+
+# Variance Decompositions (contribution of each variable to predicting a variable)
+vard <- fevd(var3, n.ahead=13)
+vard
+vard$df
+
+# IRFs with CIs
+irfs <- irf(var3, impulse = "dur", response = c("dip", "dcp"), n.ahead=24, boot=T)
+plot(irfs)
+
+irfs <- irf(var3, impulse = "dcp", response = c("dip", "dur"), n.ahead=24, boot=T)
+plot(irfs)
+
+# Finding the best fitted model
+#model from Q4
+arma = arima(dur, order = c(13,0,2), seasonal = list(order = c(1,0,0)))
+#model from Q5
+m1 = dynlm(tur~ L(tur, 1:13) + L(tip, 0:5) + L(tcp, 0:8) + season(tur))
+#model from Q6
+var3 <- VAR(yy, p=13, type="const", season = 12)
+
+#AIC/BIC
+AIC(arma);BIC(arma)
+AIC(m1);BIC(m1)
+AIC(var3);BIC(var3)
+
+#Forecasting with all three models
+# VAR 4-steps-ahead
+fcast4 <- predict(var3, n.ahead = 4, ci = 0.95) 
+plot(fcast4)
+fcast4
+# VAR 8-steps-ahead
+fcast8 <- predict(var3, n.ahead = 8, ci = 0.95) 
+plot(fcast8)
+fcast8
+
+#Four steps ahead
+# plotting forecasts for one variable (dur)
+durf <- fcast4$fcst$dur[,1]
+durflow <- fcast4$fcst$dur[,2]
+durfupp <- fcast4$fcst$dur[,3]
+
+# Column 4 is 2*se for 95% CI
+durfupp2 = fcast4$fcst$dur[,1] + fcast4$fcst$dur[,4]
+# check - these should be the same:
+cbind(durfupp, durfupp2)
+
+ff <- cbind(durf,durflow,durfupp)
+p1=matplot(ff,col=c(1,2,2),lty=1,lwd=2,type='l')
+
+# Eight steps ahead
+# plotting forecasts for one variable (dur)
+durf8 <- fcast8$fcst$dur[,1]
+durflow8 <- fcast8$fcst$dur[,2]
+durfupp8 <- fcast8$fcst$dur[,3]
+
+# Column 4 is 2*se for 95% CI
+durfupp28 = fcast8$fcst$dur[,1] + fcast8$fcst$dur[,4]
+# check - these should be the same:
+cbind(durfupp8, durfupp28)
+
+ff8 <- cbind(durf8,durflow8,durfupp8)
+p2=matplot(ff8,col=c(1,2,2),lty=1,lwd=2,type='l')
+#comparing the 4 and 8 steps ahead forcasts in two graphs
+par(mfrow=c(1,2))
+matplot(ff,col=c(1,2,2),lty=1,lwd=2,type='l')
+matplot(ff8,col=c(1,2,2),lty=1,lwd=2,type='l')
+
+### compare with actual "future" values (last 8 obs. of the data)
+# sub-sample of last 8 obs (to compare with predictions)
+cp8 = cp[(n-7):n]
+ip8 = ip[(n-7):n]
+ur8 = ur[(n-7):n]
+# last value of estimation sub-sample for converting
+# predictions back to levels:
+n = length(cp)
+cp_last = cp[n]
+ip_last = ip[n]
+ur_last = ur[n]
+
+# convert predictions back to log levels
+logurf = ur_last + cumsum(dur)
+
+##FOR 4 PERIODS
+# for intervals
+# to convert the 95% CI values, we need the CI interval (4th column of fcast)
+ci4 = fcast4$fcst$dur[,4]
+urf4upp = logurf + cumsum(ci4)
+urf4low = logurf - cumsum(ci4)
+
+# converting to levels from logs
+urf = exp(logurf)
+actual_ur = exp(ur8)
+
+# intervals converted from logs
+urf4upp = exp(urf4upp)
+urf4low = exp(urf4low)
+
+# plot actual and forecast
+ffvsact <- cbind(actual_ur[1:4], urf[1:4], urf4low[1:4],urf4upp[1:4])
+matplot(ffvsact,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+
+ffvsact8 <- cbind(actual_ur[1:8], urf[1:8], urf4low[1:8],urf4upp[1:8])
+matplot(ffvsact,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+
+par(mfrow=c(1,2))
+matplot(ffvsact,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+matplot(ffvsact8,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+
+# Add some actual values before for context
+abf = exp(ur[200:(n - 8)])
+ffact2 <- cbind(c(abf,urf), c(abf,urf4low),c(abf,urf4upp), c(abf,actual_ur[1:4]))
+matplot(ffact2,col=c(4,3,3,1),lty=1,lwd=2,type='l')
+
+# RMSPE for 4-steps-ahead
+rmspe4var = sqrt(mean((actual_ur[1:4] - urf[1:4])^2))
+rmspe4var
+#RMSPE for 8-steps-ahead
+rmspe8var = sqrt(mean((actual_ur[1:8] - urf[1:8])^2))
+rmspe8var
+
+#For ARIMA model
+# Predict with ARIMA model
+fcast_arma = predict(arma, n.ahead = 4, se.fit = TRUE)
+larma_fcast = fcast_arma$pred
+larma_ci = fcast_arma$se*2
+
+# levels prediction for ARIMA
+fcast_arima = exp(larma_fcast)
+fcast_ci = exp(larma_ci)
+fcast_arma_low = fcast_arima - fcast_ci
+fcast_arma_upp = fcast_arima + fcast_ci
+
+# plot actual and forecast for ARIMA model
+ffarima <- cbind(actual_ur[1:4], fcast_arima, fcast_arma_low,fcast_arma_upp)
+matplot(ffarima,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+
+#Forecast ARIMA 8-steps-ahead
+# Predict with ARIMA model
+fcast_arma8 = predict(arma, n.ahead = 8, se.fit = TRUE)
+larma_fcast8 = fcast_arma8$pred
+larma_ci8 = fcast_arma8$se*2
+
+# levels prediction for ARIMA
+fcast_arima8 = exp(larma_fcast8)
+fcast_ci8 = exp(larma_ci8)
+fcast_arma_low8 = fcast_arima8 - fcast_ci8
+fcast_arma_upp8 = fcast_arima8 + fcast_ci8
+
+# ploting actual and forecast for ARIMA model
+ffarima8 <- cbind(actual_ur[1:8], fcast_arima8, fcast_arma_low8,fcast_arma_upp8)
+matplot(ffarima8,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+
+par(mfrow=c(1,2))
+matplot(ffarima,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+matplot(ffarima8,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+#RMSPE 4 and 8 steps ahead
+rmspe_arima_4 = sqrt(mean((actual_ur[1:4] - fcast_arima)^2))
+rmspe_arima_4
+rmspe_arima_8 = sqrt(mean((actual_ur[1:8] - fcast_arima8)^2))
+rmspe_arima_8
+###############################
+# Using lm instead of dynlm
+dtur = embed(tur,14)
+dtip = embed(tip,14)
+dtcp = embed(tcp,14)
+source("predint.R")  ## function to generate predictions
+xnew1 = c(dtur[length(dtur[,1]),1:12],dtcp[length(dtcp[,1]),1:4], dtip[length(dtip[,1]),1:7] )
+y = dtur[,1]
+x1 = cbind(dtur[,2:13], dtcp[,2:5], dtip[,2:8])
+yf1 <- predint(y,x1,xnew1, 1, p=0.95)
+
+xnew2 = c(dtur[length(dtur[,1]),1:11],dtcp[length(dtcp[,1]),1:3], dtip[length(dtip[,1]),1:6] )
+x2 = cbind(dtur[,3:13], dtcp[,3:5], dtip[,3:8])
+yf2 <- predint(y,x2,xnew2, 1, p=0.95)
+
+xnew3 = c(dtur[length(dtur[,1]),1:10],dtcp[length(dtcp[,1]),1:2], dtip[length(dtip[,1]),1:5] )
+x3 = cbind(dtur[,4:13], dtcp[,4:5], dtip[,4:8])
+yf3 <- predint(y,x3,xnew3, 1, p=0.95)
+
+xnew4 = c(dtur[length(dtur[,1]),1:9],dtcp[length(dtcp[,1]),1], dtip[length(dtip[,1]),1:4] )
+x4 = cbind(dtur[,5:13], dtcp[,5], dtip[,5:8])
+yf4 <- predint(y,x4,xnew4, 1, p=0.95)
+###############################
+xnew5 = c(dtur[length(dtur[,1]),1:8],dtcp[length(dtcp[,1]),1], dtip[length(dtip[,1]),1:3] )
+y = dtur[,1]
+x5 = cbind(dtur[,2:13], dtcp[,2:5], dtip[,2:8])
+yf5 <- predint(y,x1,xnew1, 1, p=0.95)
+
+xnew6 = c(dtur[length(dtur[,1]),1:7],dtcp[length(dtcp[,1]),1], dtip[length(dtip[,1]),1:2] )
+x6 = cbind(dtur[,3:13], dtcp[,3:5], dtip[,3:8])
+yf6 <- predint(y,x2,xnew2, 1, p=0.95)
+
+xnew7 = c(dtur[length(dtur[,1]),1:6],dtcp[length(dtcp[,1]),1], dtip[length(dtip[,1]),1:1] )
+x7 = cbind(dtur[,4:13], dtcp[,4:5], dtip[,4:8])
+yf7 <- predint(y,x3,xnew3, 1, p=0.95)
+
+xnew8 = c(dtur[length(dtur[,1]),1:5],dtcp[length(dtcp[,1]),1], dtip[length(dtip[,1]),1:1] )
+x8 = cbind(dtur[,5:13], dtcp[,5], dtip[,5:8])
+yf8 <- predint(y,x4,xnew4, 1, p=0.95)
+################################################################################
+## Stacking the forecast values
+yflm = c(yf1$predicted, yf2$predicted, yf3$predicted, yf4$predicted)
+yflm_low = c(yf1$lopred.int, yf2$lopred.int, yf3$lopred.int, yf4$lopred.int)
+yflm_upp = c(yf1$uppred.int, yf3$uppred.int, yf3$uppred.int, yf4$uppred.int)
+
+# Get the prediction CI for rescaling to levels (from difference of log):
+lm_ci = yflm - yflm_low
+
+# levels prediction for regression model(s)
+# convert predictions back to log levels
+logurf_lm = ur_last + cumsum(yflm)
+
+# for intervals
+# to convert the 95% CI values from difference to log
+urf4upp_lm = logurf_lm + cumsum(lm_ci)
+urf4low_lm = logurf_lm - cumsum(lm_ci)
+
+# convert to levels from logs
+urf_lm = exp(logurf_lm)
+
+# intervals converted from logs
+urf4upp_lm = exp(urf4upp_lm)
+urf4low_lm = exp(urf4low_lm)
+
+# plot actual and forecast for reg. model (lm) model
+fflm <- cbind(actual_ur[1:4], urf_lm, urf4upp_lm, urf4low_lm)
+matplot(fflm,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+
+#now for 8-step dynlm(lm)
+yflm8 = c(yf1$predicted, yf2$predicted, yf3$predicted, yf4$predicted,yf5$predicted, yf6$predicted, yf7$predicted, yf8$predicted)
+yflm_low8 = c(yf1$lopred.int, yf2$lopred.int, yf3$lopred.int, yf4$lopred.int,yf5$lopred.int, yf6$lopred.int, yf7$lopred.int, yf8$lopred.int)
+yflm_upp8 = c(yf1$uppred.int, yf3$uppred.int, yf3$uppred.int, yf4$uppred.int,yf5$uppred.int, yf6$uppred.int, yf7$uppred.int, yf8$uppred.int)
+
+# Get the prediction CI for rescaling to levels (from difference of log):
+lm_ci8 = yflm8 - yflm_low8
+
+# levels prediction for regression model(s)
+# convert predictions back to log levels
+logurf_lm8 = ur_last + cumsum(yflm8)
+
+# for intervals
+# to convert the 95% CI values from difference to log
+urf4upp_lm8 = logurf_lm8 + cumsum(lm_ci8)
+urf4low_lm8 = logurf_lm8 - cumsum(lm_ci8)
+
+# convert to levels from logs
+urf_lm8 = exp(logurf_lm8)
+
+# intervals converted from logs
+urf4upp_lm8 = exp(urf4upp_lm8)
+urf4low_lm8 = exp(urf4low_lm8)
+
+# plot actual and forecast for reg. model (lm) model
+fflm8 <- cbind(actual_ur[1:8], urf_lm8, urf4upp_lm8, urf4low_lm8)
+matplot(fflm8,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+# Comparison plots
+par(mfrow=c(1,2))
+matplot(fflm,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+matplot(fflm8,col=c(1,4,3,3),lty=1,lwd=2,type='l')
+# RMSPE
+rmspe_lm_4 = sqrt(mean((actual_ur[1:4] - urf_lm)^2))
+rmspe_lm_4 
+rmspe_lm_8 = sqrt(mean((actual_ur[1:8] - urf_lm8)^2))
+rmspe_lm_8
+
+# plot Dyn. Reg., VAR and ARIMA forecasts on same figure
+ffall = cbind(actual_ur[1:4], fcast_arima, urf_lm, urf[1:4])
+matplot(ffall,col=c(1,4,3, 2),lty=1,lwd=2,type='l')
+# the same but for 8 steps
+ffall8 = cbind(actual_ur[1:8], fcast_arima8, urf_lm8, urf[1:8])
+matplot(ffall8,col=c(1,4,3, 2),lty=1,lwd=2,type='l')
+# comparison plots
+par(mfrow=c(1,2))
+matplot(ffall,col=c(1,4,3, 2),lty=1,lwd=2,type='l')
+matplot(ffall8,col=c(1,4,3, 2),lty=1,lwd=2,type='l')
+
+# RMSPE for 4&8-steps-ahead all three models
+rmspe_lm_4 = sqrt(mean((actual_ur[1:4] - urf_lm)^2))
+rmspe_arima_4 # ARIMA
+rmspe_lm_4  # dynamic regression
+rmspe4var # VAR
+rmspe_arima_8 # ARIMA
+rmspe_lm_8  # dynamic regression
+rmspe8var # VAR
+
+## Combined forecasts  ##
+length(fcast_arima);length(urf_lm);length(urf)
+# Simple average
+combinedf1 = (fcast_arima + urf_lm + urf[1:4])/3
+rmspe_cf1 = sqrt(mean((actual_ur[1:4] - combinedf1)^2))
+rmspe_cf1
+# Not as good as the VAR, but pretty good.  May do better for
+# forecasting more steps (4 is pretty small sample!)
+combinedf1 = ( urf_lm + urf[1:4])/2
+rmspe_cf3 = sqrt(mean((actual_ur[1:4] - combinedf1)^2))
+rmspe_cf3
+
+# Weighting by RMSPE
+# Generating weights based on RMSPE, they MUST sum to 1
+wlm_1 =rmspe4var/rmspe_lm_4
+warima_1 = rmspe4var/rmspe_arima_4
+wvar_1 = 1 # since it is rmspe4/rmspe4
+
+# normalizing to sum to 1
+denom = wlm_1 + warima_1 + wvar_1
+wlm = wlm_1/denom
+warima = warima_1/denom
+wvar = wvar_1/denom
+# Note that they are not that different from a simple average
+c(wlm, warima, wvar)
+
+combinedf2 = (warima*fcast_arima + wlm*urf_lm + wvar*urf[1:4])
+rmspe_urf2 = sqrt(mean((actual_ur[1:4] - combinedf2)^2))
+rmspe_urf2
+
+
+
+
